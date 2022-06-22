@@ -7,19 +7,27 @@ tags: [zio, zio-streams]
 excerpt: "An Introduction to ZIO Streams"
 ---
 
+> Add a small intro about yourself, you can find other articles here on the blog
+> (e.g. Kafka Streams or the latest Pulsar-Flink integration). Otherwise, pass
+> it to me and I'll add it after we merge.
+
 In this post, we're going to go over an introduction to the main components of
 ZIO Streams, how to work with them when things go right, and what to do when
 things go wrong.
 
-Additionally, we're going to go over a toy example of working with ZIO Streams
-asynchronously to get us in the async mind-set, as well as provide a simple, but
-functioning example of processing files modeled after markdown blog posts.
+As a toy example, we're going to take a brief foray into asynchronous
+operations, by connecting two streams to the same concurrent data structure.
+
+For a more concrete example, we are going to write a program that will parse
+markdown files, extract words identified as tags, and then regenerate those
+files with tag-related metadata injected back into them.
 
 ## Set up
 
 We're going to base this discussion off of the latest ZIO 2.0 code, which is
-still an `RC`, but hopefully won't change before release. These are the
-dependencies to include for our walk through:
+still an `RC` (at the time of writing, mid-June 2022), but the API hopefully
+won't change before release. These are the dependencies to include for our walk
+through:
 
 ```scala
 libraryDependencies ++= Seq(
@@ -29,20 +37,103 @@ libraryDependencies ++= Seq(
 )
 ```
 
+## What's a Stream?
+
+_Broadly:_ A _stream_ is a series of data elements that are made available over
+time.
+
+### LazyList
+
+A specific example of a stream implementation, is Scala's `LazyList`. A
+`LazyList` is a linked list, where the `tail` is lazily evaluated. This fits our
+broad definition above, because the tail isn't evaluated until accessed -
+meaning they are made available over the time. If we investigated this in a
+_repl_, we'd see :
+
+```shell
+scala> val ll = LazyList(1,2,3,4,5)
+val ll: scala.collection.immutable.LazyList[Int] = LazyList(<not computed>)
+
+scala> ll.head
+val res1: Int = 1
+
+scala> ll.tail
+val res2: scala.collection.immutable.LazyList[Int] = LazyList(<not computed>)
+```
+
+Once the `LazyList` has been created, we can access the `head` element, but the
+`tail` is not yet computed. This is in stark comparison to a `List`, for which
+the same exercise would yield:
+
+```shell
+scala> val l = List(1,2,3,4,5)
+val l: List[Int] = List(1, 2, 3, 4, 5)
+
+scala> l.head
+val res0: Int = 1
+
+scala> l.tail
+val res1: List[Int] = List(2, 3, 4, 5)
+```
+
+Scala's `LazyList` also has the bonus of the elements being memoized - meaning
+they are only computed once. Let's go back to the _repl_, and look at our
+`LazyList` after the first two elements have been accessed.
+
+```shell
+scala> ll.tail.head
+val res3: Int = 2
+
+scala> ll
+val res4: scala.collection.immutable.LazyList[Int] = LazyList(1, 2, <not computed>)
+```
+
+We can see that the first two elements now clearly show! If you haven't felt the
+excitement of generating the Fibonacci sequence with `LazyList`s, I encourage
+you to do so. However, the most important take-away from this feature, is that
+_memoization_ is not in our broad definition above - this is not a feature of
+all streams.
+
+### Logs-As-A-Stream
+
+Many messaging platforms, such as Kafka, Pulsar, and/ RabbitMQ have what they
+advertise as `Stream`s. At the heart of this, there is the concept that a
+message is _produced_, and written to disk as an _append-only_ log. _Some time
+later_ a `consumer` can read back entries to that log at their own leisure. This
+fits our broad definition, because the data is ordered and available over time.
+
+### FileInputStream
+
+If we think about a text file on disk, it's not terribly different than our
+append-only log above. It is an ordered collection of `byte`s, we can read them
+in one at a time, and do something with that information as we go. A notable
+difference from above, is that the file contents between to positions can
+change - i.e. there is no guarantee that if I re-process the text file that the
+first 1000 bytes will be the same as before.
+
+### Stream Recap
+
+We can see that the fluid meaning of what a stream is can solidify itself around
+a context - we have to keep our broad definition in mind, so we don't ensnare
+ourselves into popular implementation details, as we move on to ZIO Streams.
+
 ## ZIO Stream Components
 
 Before we start discussing the core components of ZIO Streams, let's first
 revisit the type signature of a zio: `ZIO[R, E, A]`. This is an effect that will
-compute a result `A`, requires dependencies `R` to do so, and could possibly
-fail with an error `E`. Note, that `E` are errors you maybe potentially want to
-recover from - an error which occurs that is not of type `E` is called a
-_defect_. If there are no dependencies required, then `R` is `Any`. If there are
-no errors you expect to recover from, then `E` is `Nothing`. These Types will be
-central to our understanding of ZStreams going forward!
+compute a single _value_ of type `A`, requires _dependencies_ of type `R` to do
+so, and could possibly fail with an _error_ of type `E`. Note, that `E` are
+errors you potentially want to recover from - an error which occurs that is not
+of type `E` is called a _defect_. If there are no dependencies required, then
+`R` is `Any`. If there are no errors you expect to recover from, then `E` is
+`Nothing`. The concept of declaring _dependencies_, _errors_, and _values_ in
+our type signature will be central to our understanding of `ZStream`s going
+forward!
 
-We should also briefly mention `Chunk[A]`. Due to practicality, and performance,
-all things work in batches, and the `zio.Chunk[A]` is an immutable array-backed
-_collection_ which will often present itself when working with ZStreams.
+We should also briefly mention the `Chunk[A]`. Due to practicality, and
+performance, our streams work in batches, and the `zio.Chunk[A]` is an immutable
+array-backed _collection_, containing elements of type `A`, which will often
+present itself when working with `ZStream`s.
 
 ### ZStream
 
@@ -57,22 +148,24 @@ A ZStream represents the _source_ of data in your work flow.
 
 At the opposite end of our stream, we have a `ZSink`, with the signature:
 `ZSink[R, E, I, L, Z]`. `R`, and `E` are as described above. It will consume
-input of `I`, producing `Z` and any `L` that may be left over.
+elements of type `I`, and produce a value of type `Z` and any elements of type
+`L` that may be left over.
 
 A ZSink represents the terminating _endpoint_ of data in your workflow.
 
-Let's have a quick chat about that `L` type. `L` can really depend on the
-operation you are performing. For example, if your intention is to sum a stream
-of integers, you wouldn't expect there to be anything left over.
+`L` deserves a dedicated note: `L` describes values that have not been processed
+by the `ZSink`. For example, if our intent is to sum every element in the
+stream, then we would not expect any elements to be left over once processed:
 
 ```scala
   val sum: ZSink[Any, Nothing, Int, Nothing, Int] =
     ZSink.sum[Int]
 ```
 
-On the other hand, an operation like `take` implies that there are possibly
-elements you are not operating on. Let's also map our output, so we can see the
-different output type.
+On the other hand, if our intent is to only operate on the first few elements of
+a stream, via an operation like `take`, then there exists the possibility that
+there are remaining, unprocessed values. Let's also map our output, so we can
+see the different output type.
 
 ```scala
   val take5: ZSink[Any, Nothing, Int, Int, Chunk[Int]] =
@@ -118,10 +211,20 @@ call as well.
     take5.dimap[String, Chunk[String]](_.toInt, _.map(_.toString))
 ```
 
-Notice that he `L` is still `Int`. With contramap, we are operating on input
-element to get it to the correct type (`String`), however, if anything is left
-over, then it wasn't operated on - meaning it's still the input type from
-`take5` (`Int`).
+Notice that the type of `L` is still `Int`. With `contramap`, we are operating
+on the input element to get it to the correct type (`String`), however, if
+anything is left over, then it wasn't operated on - meaning it's still the input
+type from `take5` (`Int`).
+
+It's worthwhile to pause here, and discuss `contramap`. We are converting a
+value of type `A` to a value of type `B`, with a function that is `B => A` -
+this operates like `map` _in reverse_. Without diving too far into category
+theory, you can think of a Covariant Functor as something that may "produce" a
+value of type `A` (and implements a `map`), whereas a Contravariant Functor may
+"consume" a value of type `A` (and implements a `contramap`). With JSON as an
+example, the _contravariant_ `Encoder[A]` consumes a value of type `A` and
+produces JSON, whereas the _covariant_ `Decoder[A]` produces a value of type `A`
+by consuming JSON.
 
 ### ZPipelines
 
@@ -146,12 +249,23 @@ Instead of adapting our `sum` ZSink with contramap, we can write:
     stringStream.via(businessLogic).run(sum)
 ```
 
-Along with the typical collection like operations you'd expect, there are a
+> This one is the critical, essential concept. We take a stream from source,
+> transform it along the way, then push the transformed values into the sink to
+> obtain our final result. The act of starting such a stream is described by the
+> final ZIO that is returned by the run method.
+
+> I think it's worth adding a small bit after the code snippet with this
+> description.
+
+Along with the typical collection-like operations you'd expect, there are a
 number of addition ones that are available directly on `ZStream` and can be
 referenced in the
 [official docs](https://zio.dev/next/datatypes/stream/zstream/#operations) .
 
 ## Handling Failures
+
+> I think some concrete examples with outputs will illustrate the concepts here
+> better. Same with orElseEither, catchSome, catchAll.
 
 If we think of some `val s1: ZStream[R, E, A]`, we can use the `orElse` methods
 to directly provide a recovery stream. The interesting thing of `orElseEither`
@@ -188,6 +302,9 @@ If we want to push our error handling downwards, we can also transform a
 `ZStream[R, E, A]` to `ZStream[R, Nothing, Either[E, A]]` via `either` (e.g.
 `s1.either`).
 
+> I didn't understand too much of this paragraph. An example of in-place
+> dropping and collectRight will clear all doubts.
+
 Recovering form a failure in a `ZStream` generally revolves around providing a
 secondary stream to recover with. If you are looking to recover "in-place", by
 effectively just dropping that element which caused trouble while processing the
@@ -210,6 +327,8 @@ another stream that now doesn't have to address that concern.
 
 After our `ZStream` practice above, we might first write something like this:
 
+> who's dirtyStream? Feel free to add the entire context here.
+
 ```scala
   // Bad code!
   val program: ZIO[Any, Throwable, ExitCode] = for {
@@ -220,6 +339,11 @@ After our `ZStream` practice above, we might first write something like this:
       .run(ZSink.sum[Int]).debug("sum")
   } yield ExitCode.success
 ```
+
+> What do we think? Reading this, I'm not sure what is supposed to happen - we
+> can explain this to the reader. This may feel dumbing down because as the
+> writer, we have it crystal clear, but I've never been told I explained too
+> much, only too little.
 
 and it will _almost_ do what we think! It will process the values, and feed them
 to the second `ZStream`, but our program will hang. Why? Because we're working
@@ -353,6 +477,9 @@ take are:
 
 Let's also set up some helpers to looks for our `#tag`, as well as a reusable
 regex to remove punctuation when we need to.
+
+> We need to introduce >>>, because it's not obvious and we're already using it
+> in a "bigger" app.
 
 Along with our ZSink, we can make _compose_ our ZPipeline components together
 with the `>>>` operator, and bundle them together as:
