@@ -99,23 +99,39 @@ all streams.
 Many messaging platforms, such as Kafka, Pulsar, and/ RabbitMQ have what they
 advertise as `Stream`s. At the heart of this, there is the concept that a
 message is _produced_, and written to disk as an _append-only_ log. _Some time
-later_ a `consumer` can read back entries to that log at their own leisure. This
-fits our broad definition, because the data is ordered and available over time.
+later_ a `consumer` can read back entries from that log at their own leisure,
+and there is a guarantee that the within the same offset (i.e. the first 1000
+elements), the data will be constant, even if re-processed later. This fits our
+broad definition, because the data is ordered and available over time.
 
 ### FileInputStream
 
-If we think about a text file on disk, it's not terribly different than our
-append-only log above. It is an ordered collection of `byte`s, we can read them
-in one at a time, and do something with that information as we go. A notable
-difference from above, is that the file contents between to positions can
-change - i.e. there is no guarantee that if I re-process the text file that the
-first 1000 bytes will be the same as before.
+In our example later, we are going to process blog posts to parse tag-data.
+These files are not processed terribly different than our append-only log above;
+any given file is an ordered collection of elements, we read them in one at a
+time, and do something with that information as we go. A notable difference from
+above, is that the elements within an offset can change _when not being
+processed_. If I go back and edit a blog post, there is no guarantee that when
+the file is re-processed that the first 1000 elements will be the same as
+before.
 
 ### Stream Recap
 
 We can see that the fluid meaning of what a stream is can solidify itself around
-a context - we have to keep our broad definition in mind, so we don't ensnare
-ourselves into popular implementation details, as we move on to ZIO Streams.
+a context.
+
+If we're in the mindset of Kafka, a stream might mean the implication of
+consistent data within an offset _at all times_.
+
+If we're in the mindset of parsing files, a stream might imply meaningfully
+ordered elements that consistently build a larger concept, _at the time of
+processing_. This is to say, here it is more important that a stream of `Byte`
+can always be processed into a `String` by following an encoding pattern. If we
+go back and re-process it, we don't care if the contents have changed, just that
+the content can be processed.
+
+As we move on to ZIO Streams, we should keep our broad definition in mind, so we
+don't ensnare ourselves on the implementation details.
 
 ## ZIO Stream Components
 
