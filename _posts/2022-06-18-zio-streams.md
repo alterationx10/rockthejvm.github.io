@@ -238,8 +238,8 @@ this operates like `map` _in reverse_. Without diving too far into category
 theory, you can think of a Covariant Functor as something that may "produce" a
 value of type `A` (and implements a `map`), whereas a Contravariant Functor may
 "consume" a value of type `A` (and implements a `contramap`). With JSON as an
-example, the _contravariant_ `Encoder[A]` consumes a value of type `A` and
-produces JSON, whereas the _covariant_ `Decoder[A]` produces a value of type `A`
+example, the _contravariant_ `Encoder[A]` consumes a value of type `A` to
+produce JSON, whereas the _covariant_ `Decoder[A]` produces a value of type `A`
 by consuming JSON.
 
 ### ZPipelines
@@ -265,13 +265,30 @@ Instead of adapting our `sum` ZSink with contramap, we can write:
     stringStream.via(businessLogic).run(sum)
 ```
 
-> This one is the critical, essential concept. We take a stream from source,
-> transform it along the way, then push the transformed values into the sink to
-> obtain our final result. The act of starting such a stream is described by the
-> final ZIO that is returned by the run method.
+We can also _compose_ `ZPipeline`s together to form a new `ZPipeline` with
+`>>>`, for example:
 
-> I think it's worth adding a small bit after the code snippet with this
-> description.
+```scala
+  val businessLogic: ZPipeline[Any, Nothing, String, Int] =
+    ZPipeline.map[String, Int](_.toInt)
+
+  val filterLogic: ZPipeline[Any, Nothing, Int, Int] =
+    ZPipeline.filter[Int](_ > 3)
+
+  val appLogic: ZPipeline[Any, Nothing, String, Int] =
+    businessLogic >>> filterLogic
+
+  val zio: ZIO[Any, Nothing, Int] =
+    stringStream.via(appLogic).run(sum)
+```
+
+An interesting thing we're seeing here for the first time, is seeing that
+connecting a `ZSink` to a `ZStream` results in a `ZIO`. In oder to process of
+our stream logic, we need to connect streams to sinks to produce a `ZIO` we can
+evaluate. As we're talking about the complete processing of a stream, we should
+mention that ZIO uses pull-based streams, meaning that elements are processed by
+being "pulled through the stream" by the sink. In push-based systems, elements
+would be "pushed through the stream" to the sink.
 
 Along with the typical collection-like operations you'd expect, there are a
 number of addition ones that are available directly on `ZStream` and can be
@@ -493,9 +510,6 @@ take are:
 
 Let's also set up some helpers to looks for our `#tag`, as well as a reusable
 regex to remove punctuation when we need to.
-
-> We need to introduce >>>, because it's not obvious and we're already using it
-> in a "bigger" app.
 
 Along with our ZSink, we can make _compose_ our ZPipeline components together
 with the `>>>` operator, and bundle them together as:
