@@ -291,7 +291,7 @@ being "pulled through the stream" by the sink. In push-based systems, elements
 would be "pushed through the stream" to the sink.
 
 Along with the typical collection-like operations you'd expect, there are a
-number of addition ones that are available directly on `ZStream` and can be
+number of addition ones that are available directly on `ZStream`, and can be
 referenced in the
 [official docs](https://zio.dev/next/datatypes/stream/zstream/#operations) .
 
@@ -300,49 +300,198 @@ referenced in the
 > I think some concrete examples with outputs will illustrate the concepts here
 > better. Same with orElseEither, catchSome, catchAll.
 
-If we think of some `val s1: ZStream[R, E, A]`, we can use the `orElse` methods
-to directly provide a recovery stream. The interesting thing of `orElseEither`
-is that we can distinguish the transition when `s1` failed, and `s2` was used,
-as `s1` values would be a `Left` and values from `s2` would be `Right`.
+Illustrating failures can be a little lack-luster in a less-interactive medium,
+suh as reading a blog post. For example, we might declare a example of stream
+with a failure as
 
 ```scala
-s1.orElse(s2: => ZStream[R1, E1, A1]): ZStream[R1, E1, A1]
-s1.orElseEither(s2: => ZStream[R1, E1, A1]): ZStream[R1, E1, Either[A, A1]]
+  val failStream: ZStream[Any, String, Int] = ZStream(1, 2) ++ ZStream.fail("Abstract reason") ++ ZStream(4, 5)
 ```
+
+but what does that mean in use? You're not going to intentionally instantiate a
+`ZStream` with a `.fail` in the middle of of it. Thinking about how you can get
+into a failure state is as valuable as how to recover from it. So instead of the
+example above, let's do something that feels more real, and implement an
+`InputStream` that we can control the success/failure cases.
+
+```scala
+  class FakeInputStream[T <: Throwable](failAt: Int, failWith: => T) extends InputStream {
+    val data: Array[Byte] = "0123456789".getBytes
+    var counter = 0
+
+    override def read(b: Array[Byte]): Int = {
+      if (counter == failAt) throw failWith
+      if (counter < data.length) {
+        b(0) = data(counter)
+        counter += 1
+        1
+      } else {
+        -1
+      }
+    }
+
+    // Not used, but needs to be implemented
+    override def read(): Int = ???
+  }
+```
+
+Our `FakeInputStream` with make the elements of the string `"0123456789"`
+available. In the constructor, we can pass in a `failAt` to indicate the point
+when we should throw an exception, and `failWith` is the exception we should
+throw. By setting `failAt` higher than the length of our string, we wont fail.
+By passing in different instances of `failsWith`, we can control wether or not
+if the error is in the `E` channel of our `ZStream[R, E, O]`.
+
+With this in mind, let's set up some stream components that we can run together,
+and test different error cases.
+
+```scala
+  // 99 is higher than the length of our data, so we won't fail
+  val nonFailingStream: ZStream[Any, IOException, String] =
+    ZStream.fromInputStream(new FakeInputStream(99, new IOException("")), chunkSize = 1)
+      .map(b => new String(Array(b)))
+
+  // We will fail, and the error type matches ZStream error channel
+  val failingStream: ZStream[Any, IOException, String] =
+    ZStream.fromInputStream(new FakeInputStream(5, new IOException("")), chunkSize = 1)
+      .map(b => new String(Array(b)))
+
+  // We fail, but the error does not match the ZStream error channel
+  val defectStream: ZStream[Any, IOException, String] =
+    ZStream.fromInputStream(new FakeInputStream(5, new IndexOutOfBoundsException("")), chunkSize = 1)
+      .map(b => new String(Array(b)))
+
+  // When recovering, we will use this ZStream as the fall-back
+  val recoveryStream: ZStream[Any, Throwable, String] =
+    ZStream("a", "b", "c")
+
+  // We will pull values one at a time, and turn them into one string separated by "-"
+  val sink: ZSink[Any, Nothing, String, Nothing, String] =
+    ZSink.collectAll[String].map(_.mkString("-"))
+```
+
+If we were to define a program, and look at the output of the success case, it
+might look like:
+
+```scala
+object ZStreamExample extends ZIOAppDefault {
+
+  override def run: ZIO[Any with ZIOAppArgs with Scope, Any, Any] =
+    nonFailingStream
+      .run(sink)
+      .debug("sink")
+}
+```
+
+and we would see the output `sink: 0-1-2-3-4-5-6-7-8-9`.
+
+Now let's turn our attention to the `failingStream`.
+
+```scala
+  override def run: ZIO[Any with ZIOAppArgs with Scope, Any, Any] =
+    failingStream
+      .run(sink)
+      .debug("sink")
+```
+
+The above code will fail less than gracefully, with something like
+
+```shell
+<FAIL> sink: Fail(java.io.IOException: ,StackTrace(Runtime(6,1655962329,),Chunk(com.alterationx10.zse.ZStreamExample.run(ZStreamExample.scala:53),com.alterationx10.zse.ZStreamExample.run(ZStreamExample.scala:54))))
+timestamp=2022-06-23T05:32:09.924145Z level=ERROR thread=#zio-fiber-0 message="" cause="Exception in thread "zio-fiber-6" java.io.IOException: java.io.IOException:
+	at com.alterationx10.zse.ZStreamExample.run(ZStreamExample.scala:53)
+	at com.alterationx10.zse.ZStreamExample.run(ZStreamExample.scala:54)"
+```
+
+Let's see how we can recover with `orElse`/`orElseEither`:
+
+```scala
+  override def run: ZIO[Any with ZIOAppArgs with Scope, Any, Any] =
+    failingStream.orElse(recoveryStream)
+      .run(sink)
+      .debug("sink")
+```
+
+outputs `sink: 0-1-2-3-4-a-b-c`. From the result, we can see that the elements
+of the original stream were processed up to the point of failure, and then
+elements of the recovery stream started to be processed afterwards.
+
+```scala
+  override def run: ZIO[Any with ZIOAppArgs with Scope, Any, Any] =
+    failingStream.orElseEither(recoveryStream)
+      .run(ZSink.collectAll[Either[String, String]])
+      .debug("sink")
+```
+
+outputs
+`sink: Chunk(Left(0),Left(1),Left(2),Left(3),Left(4),Right(a),Right(b),Right(c))`.
+The interesting thing of `orElseEither` is that we can distinguish the
+transition when `failingStream` failed, and `recoveryStream` was used, as the
+former values would be a `Left` and latter values would be `Right`. Note that we
+adjusted our `ZSink` here, sone the output changed from `String` to
+`Either[String, String]`.
 
 If we want to recover from specific failures via
 `PartialFunction[E, ZStream[R1, E1, A1]]`s we can use `catchSome` ( or
 `catchSomeCause` for causes - a.k.a _defects_).
 
 ```scala
-s1.catchSome {
-  case e1: Error1 => s2
-}
+  override def run: ZIO[Any with ZIOAppArgs with Scope, Any, Any] =
+    failingStream.catchSome {
+      case _: IOException => recoveryStream
+    }
+      .run(sink)
+      .debug("sink")
+
+  override def run: ZIO[Any with ZIOAppArgs with Scope, Any, Any] =
+    defectStream.catchSomeCause {
+      case Fail(e: IOException, _) => recoveryStream
+      case Die(e: IndexOutOfBoundsException, _) => recoveryStream
+    }
+      .run(sink)
+      .debug("sink")
 ```
+
+Both of the examples above result in `sink: 0-1-2-3-4-a-b-c`. We can see that
+with `catchSomeCause` we can also drill into the cause, and be able to recover
+from errors that are not included in the error channel of our `ZStream`.
 
 If we want to exhaustively recover from errors via `E => ZStream[R1, E2, A1]`)
 (and causes), we can use `catchAll` (or `catchAllCause`).
 
 ```scala
-s1.catchAll {
-  case e1: Error1 => s2
-  case e2: Error2 => s3
-  case _          => s4
-}
+  override def run: ZIO[Any with ZIOAppArgs with Scope, Any, Any] =
+    failingStream.catchAll {
+      case _: IOException => recoveryStream
+      case _ => ZStream("x", "y", "z")
+    }
+      .run(sink)
+      .debug("sink")
+
+  override def run: ZIO[Any with ZIOAppArgs with Scope, Any, Any] =
+    defectStream.catchAllCause(_ => recoveryStream)
+      .run(sink)
+      .debug("sink")
 ```
 
+Both of the examples above result in `sink: 0-1-2-3-4-a-b-c`.
+
 If we want to push our error handling downwards, we can also transform a
-`ZStream[R, E, A]` to `ZStream[R, Nothing, Either[E, A]]` via `either` (e.g.
-`s1.either`).
+`ZStream[R, E, A]` to `ZStream[R, Nothing, Either[E, A]]` via `either`.
 
-> I didn't understand too much of this paragraph. An example of in-place
-> dropping and collectRight will clear all doubts.
+```scala
+  override def run: ZIO[Any with ZIOAppArgs with Scope, Any, Any] =
+    failingStream.either
+      .run(ZSink.collectAll[Either[IOException, String]])
+      .debug("sink")
+```
 
-Recovering form a failure in a `ZStream` generally revolves around providing a
-secondary stream to recover with. If you are looking to recover "in-place", by
-effectively just dropping that element which caused trouble while processing the
-data, you could do something heavy handed like `s1.either.collectRight`. For
-more robust solutions, we would likely need to encode that logic elsewhere.
+will succeed, and output
+`sink: Chunk(Right(0),Right(1),Right(2),Right(3),Right(4),Left(java.io.IOException: ))`.
+We can see that we have our processed values up until the failures as `Right`s,
+ending with a `Left` of the failure, and we did not have to provide a recovery
+stream. If we felt this level of processing was good enough, we could use
+`failingStream.either.collectRight.run(sink)` to get `sink: 0-1-2-3-4`.
 
 ## Async ZStreams
 
