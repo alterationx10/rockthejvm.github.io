@@ -297,9 +297,6 @@ referenced in the
 
 ## Handling Failures
 
-> I think some concrete examples with outputs will illustrate the concepts here
-> better. Same with orElseEither, catchSome, catchAll.
-
 Illustrating failures can be a little lack-luster in a less-interactive medium,
 suh as reading a blog post. For example, we might declare a example of stream
 with a failure as
@@ -308,7 +305,7 @@ with a failure as
   val failStream: ZStream[Any, String, Int] = ZStream(1, 2) ++ ZStream.fail("Abstract reason") ++ ZStream(4, 5)
 ```
 
-but what does that mean in use? You're not going to intentionally instantiate a
+but what does that mean in use? We're not going to intentionally instantiate a
 `ZStream` with a `.fail` in the middle of of it. Thinking about how you can get
 into a failure state is as valuable as how to recover from it. So instead of the
 example above, let's do something that feels more real, and implement an
@@ -507,34 +504,30 @@ two `ZStream`s together with the _same_ queue? Let's look at a toy example,
 where we "process" one stream to sanitize values, that we then feed that into
 another stream that now doesn't have to address that concern.
 
-After our `ZStream` practice above, we might first write something like this:
-
-> who's dirtyStream? Feel free to add the entire context here.
+After our `ZStream` practice above, and a reminder that `parsePipeline` converts
+`String`s to `Int`s, we might first write something like this:
 
 ```scala
   // Bad code!
   val program: ZIO[Any, Throwable, ExitCode] = for {
     queue <- Queue.unbounded[Int]
-    producer <- dirtyStream.via(parsePipeline)
+    producer <- nonFailingStream.via(parsePipeline)
       .run(ZSink.fromQueue(queue))
     result <- ZStream.fromQueue(queue)
       .run(ZSink.sum[Int]).debug("sum")
   } yield ExitCode.success
 ```
 
-> What do we think? Reading this, I'm not sure what is supposed to happen - we
-> can explain this to the reader. This may feel dumbing down because as the
-> writer, we have it crystal clear, but I've never been told I explained too
-> much, only too little.
-
-and it will _almost_ do what we think! It will process the values, and feed them
-to the second `ZStream`, but our program will hang. Why? Because we're working
-with asynchronous things now. Our `result` has processed all the elements from
-our `producer` - but it continues to wait for any new values that could be
-passed into the our `queue`. It can't complete! We need to signal to `result`
-that we should finalize, by closing the `queue`. We could make a `Promise`, and
-use it to `await` before closing the `queue`, but luckily this functionality is
-already included with `ZSink.fromQueueWithShutdown`
+and it will _almost_ do what we think! We expected it to funnel all of the
+elements of the first `ZStream` through the second, and them sum them in the
+`ZSink.sum` to produce a resulting value. However, it will process the values,
+and feed them to the second `ZStream`, **but** our program will hang. Why?
+Because we're working with asynchronous things now. Our `result` has processed
+all the elements from our `producer` - but it continues to wait for any new
+values that could be passed into the our `queue`. It can't complete! We need to
+signal to `result` that we should finalize, by closing the `queue`. We could
+make a `Promise`, and use it to `await` before closing the `queue`, but luckily
+this functionality is already included with `ZSink.fromQueueWithShutdown`
 
 Now, we might be tempted to write:
 
@@ -542,7 +535,7 @@ Now, we might be tempted to write:
   // Still bad code!
   val program: ZIO[Any, Throwable, ExitCode] = for {
     queue <- Queue.unbounded[Int]
-    producer <- dirtyStream.via(parsePipeline)
+    producer <- nonFailingStream.via(parsePipeline)
       .run(ZSink.fromQueueWithShutdown(queue))
     result <- ZStream.fromQueue(queue)
       .run(ZSink.sum[Int]).debug("sum")
@@ -559,7 +552,7 @@ it, and our second stream has opened from it to process the values in it.
 ```scala
   val program: ZIO[Any, Throwable, ExitCode] = for {
     queue <- Queue.unbounded[Int]
-    producer <- dirtyStream.via(parsePipeline)
+    producer <- nonFailingStream.via(parsePipeline)
       .run(ZSink.fromQueueWithShutdown(queue))
       .fork
     result <- ZStream.fromQueue(queue)
