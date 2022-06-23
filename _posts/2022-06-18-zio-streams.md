@@ -1,15 +1,11 @@
 ---
 title: "ZIO Streams: An Introduction"
-date: 2022-06-12
+date: 2022-06-18
 header:
   image: "/images/blog cover.jpg"
 tags: [zio, zio-streams]
 excerpt: "An Introduction to ZIO Streams"
 ---
-
-> Add a small intro about yourself, you can find other articles here on the blog
-> (e.g. Kafka Streams or the latest Pulsar-Flink integration). Otherwise, pass
-> it to me and I'll add it after we merge.
 
 In this post, we're going to go over an introduction to the main components of
 ZIO Streams, how to work with them when things go right, and what to do when
